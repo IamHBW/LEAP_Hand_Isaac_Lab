@@ -31,6 +31,16 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 current_dir = Path(__file__).parent
+_LOCAL_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+_LOCAL_MUG_USD_PATH = str((_LOCAL_ASSETS_DIR / "mug.usd").resolve())
+
+# Object scaling
+# NOTE: `mdp.randomize_rigid_body_scale` uses an absolute uniform scale range (not a multiplier).
+# So to randomize "around" the spawn scale, set the spawn scale explicitly and set an absolute range
+# centered on that value.
+_OBJECT_BASE_UNIFORM_SCALE = 0.01
+_OBJECT_SPAWN_SCALE = (_OBJECT_BASE_UNIFORM_SCALE, _OBJECT_BASE_UNIFORM_SCALE, _OBJECT_BASE_UNIFORM_SCALE)
+_OBJECT_UNIFORM_SCALE_RANGE = (_OBJECT_BASE_UNIFORM_SCALE * 0.9, _OBJECT_BASE_UNIFORM_SCALE * 1.1)
 
 @configclass
 class EventCfg:
@@ -90,7 +100,8 @@ class EventCfg:
         mode="prestartup",
         params={
             "asset_cfg": SceneEntityCfg("object"),
-            "scale_range": (1.1, 1.25), # adr with object scale is not possible so have to define across all envs
+            # Randomize object scale around `_OBJECT_SPAWN_SCALE`.
+            "scale_range": _OBJECT_UNIFORM_SCALE_RANGE,
         },
     )
 
@@ -140,7 +151,7 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            usd_path=_LOCAL_MUG_USD_PATH,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -152,23 +163,23 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
                 max_depenetration_velocity=1000.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(density=400.0),
-            scale=(1.2, 1.2, 1.2),
+            scale=_OBJECT_SPAWN_SCALE,
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.00, -0.1, 0.56), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.00, -0.06, 0.58), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     # goal object
     goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/goal_marker",
         markers={
             "goal": sim_utils.UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(1.2, 1.2, 1.2),
+                usd_path=_LOCAL_MUG_USD_PATH,
+                scale=_OBJECT_SPAWN_SCALE,
             )
         },
     )
     
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2048, env_spacing=0.75, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=512, env_spacing=0.75, replicate_physics=False)
     # reward scales
     z_rotation_steps = 16
     dist_reward_scale = -10.0
