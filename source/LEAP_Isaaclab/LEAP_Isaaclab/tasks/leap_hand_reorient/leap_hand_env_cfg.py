@@ -38,7 +38,7 @@ class EventCfg:
 
     # -- robot
     robot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+        func=mdp.randomize_rigid_body_material, # pyright: ignore[reportArgumentType]
         mode="reset",
         min_step_count_between_reset=720,
         params={
@@ -63,7 +63,7 @@ class EventCfg:
 
     # -- object
     object_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+        func=mdp.randomize_rigid_body_material, # pyright: ignore[reportArgumentType]
         min_step_count_between_reset=720,
         mode="reset",
         params={
@@ -116,8 +116,8 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
         ),
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
-            gpu_max_rigid_contact_count=2**25,
-            gpu_max_rigid_patch_count=2**25
+            gpu_max_rigid_contact_count=2**23,
+            gpu_max_rigid_patch_count=2**23
         ),
     )
 
@@ -166,7 +166,7 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
     )
     
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=8192, env_spacing=0.75, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=0.75, replicate_physics=False)
     # reward scales
     z_rotation_steps = 16
     dist_reward_scale = -10.0
