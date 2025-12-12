@@ -12,7 +12,7 @@ from LEAP_Isaaclab.assets import LEAP_HAND_CFG
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs import DirectRLEnvCfg,ViewerCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
@@ -105,6 +105,8 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
     store_cur_actions = True
     observation_space = 96
     state_space = 0
+    viewer: ViewerCfg = ViewerCfg()
+    viewer.eye = (0,0,2)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -166,7 +168,7 @@ class LeapHandEnvCfg(DirectRLEnvCfg):
     )
     
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=0.75, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2048, env_spacing=0.75, replicate_physics=False)
     # reward scales
     z_rotation_steps = 16
     dist_reward_scale = -10.0
