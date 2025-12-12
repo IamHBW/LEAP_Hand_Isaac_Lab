@@ -5,11 +5,25 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg, RslRlPpoAlgorithmCfg
-
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 @configclass
-class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class CustomPpoActorCriticRecurrentCfg:
+    class_name: str = "ActorCriticRecurrent"
+    init_noise_std: float = 1.0
+    actor_hidden_dims: list[int] = [512, 256, 128]
+    critic_hidden_dims: list[int] = [512, 256, 128]
+    activation: str = "elu"
+    rnn_type: str = "gru"
+    rnn_hidden_dims: list[int] = [256]
+    rnn_units=256
+    rnn_layers=1
+    use_layernorm=True
+    rnn_after_mlp=False 
+    concat_rnn_input=True
+
+@configclass
+class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg): 
     seed = 42
     num_steps_per_env = 32
     max_iterations = 5000
@@ -17,18 +31,7 @@ class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "leap_hand_reorient"
     device = "cuda:0"
     empirical_normalization = True
-    policy = RslRlPpoActorCriticRecurrentCfg(
-        init_noise_std=1.0,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
-        activation="elu",
-        rnn_type="gru",
-        rnn_units=256,
-        rnn_layers=1,
-        use_layernorm=True,
-        rnn_after_mlp=False, 
-        concat_rnn_input=True,
-    )
+    policy = CustomPpoActorCriticRecurrentCfg()
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=4.0,
         use_clipped_value_loss=True,
