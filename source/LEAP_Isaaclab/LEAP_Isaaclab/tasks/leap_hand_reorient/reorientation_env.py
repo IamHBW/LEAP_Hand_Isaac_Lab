@@ -89,6 +89,7 @@ class ReorientationEnv(DirectRLEnv):
 
         self.successes = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.consecutive_successes = torch.zeros(1, dtype=torch.float, device=self.device)
+        self.invalid_state_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self.override_default_joint_pos = torch.tensor(
             [[0.000, 0.500, 0.000, 0.000, -0.750, 1.300, 0.000, 0.750, 1.750, 1.500, 1.750, 1.750, 0.000, 1.000, 0.000, 0.000]],
@@ -279,6 +280,36 @@ class ReorientationEnv(DirectRLEnv):
         self.goal_rot[env_ids] = quat_from_euler_xyz(roll, pitch, yaw)
         self._update_continuous_z_rotation(env_ids)
 
+    def _invalid_rows(self, tensor: torch.Tensor) -> torch.Tensor:
+        return ~torch.isfinite(tensor.reshape(tensor.shape[0], -1)).all(dim=1)
+
+    def _sanitize_invalid_state(self, env_ids: torch.Tensor) -> None:
+        if len(env_ids) == 0:
+            return
+        self.hand_dof_pos[env_ids] = self.override_default_joint_pos[env_ids]
+        self.hand_dof_vel[env_ids] = 0.0
+        self.fingertip_pos[env_ids] = 0.0
+        self.fingertip_rot[env_ids] = 0.0
+        self.fingertip_rot[env_ids, :, 0] = 1.0
+        self.object_pos[env_ids] = self.in_hand_pos[env_ids]
+        self.object_rot[env_ids] = self.object_default_state[env_ids, 3:7]
+        self.object_linvel[env_ids] = 0.0
+        self.object_angvel[env_ids] = 0.0
+
+    def _update_invalid_state_mask(self) -> None:
+        self.invalid_state_buf = (
+            self._invalid_rows(self.hand_dof_pos)
+            | self._invalid_rows(self.hand_dof_vel)
+            | self._invalid_rows(self.fingertip_pos)
+            | self._invalid_rows(self.fingertip_rot)
+            | self._invalid_rows(self.object_pos)
+            | self._invalid_rows(self.object_rot)
+            | self._invalid_rows(self.object_linvel)
+            | self._invalid_rows(self.object_angvel)
+        )
+        invalid_env_ids = self.invalid_state_buf.nonzero(as_tuple=False).squeeze(-1)
+        self._sanitize_invalid_state(invalid_env_ids)
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
 
@@ -387,9 +418,17 @@ class ReorientationEnv(DirectRLEnv):
             self.cfg.av_factor,
         )
 
+        if self.invalid_state_buf.any():
+            total_reward = torch.where(
+                self.invalid_state_buf,
+                torch.full_like(total_reward, self.cfg.fall_penalty),
+                total_reward,
+            )
+
         self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean() / self.cfg.z_rotation_steps
         self.extras["log"]["pose_diff_penalty"] = pose_diff_penalty.mean() 
         self.extras["log"]["torque_info"] = torque_penalty.mean() 
+        self.extras["log"]["invalid_state_count"] = self.invalid_state_buf.float().sum()
         self.extras["log"]['object_linvel'] = torch.norm(self.object_linvel, p=1, dim=-1).mean()
         self.extras["log"]['roll'] = self.object_angvel[:, 0].mean()
         self.extras["log"]['pitch'] = self.object_angvel[:, 1].mean()
@@ -425,7 +464,7 @@ class ReorientationEnv(DirectRLEnv):
         diff = torch.sum(obj_z * goal_z, dim=1)
         flipped = (torch.abs(diff) < 0.5)
 
-        out_of_reach = out_of_reach | flipped
+        out_of_reach = out_of_reach | flipped | self.invalid_state_buf
 
         return out_of_reach, time_out
 
@@ -489,6 +528,7 @@ class ReorientationEnv(DirectRLEnv):
         self.object_rot = self._object_tensor("root_quat_w")
         self.object_linvel = self._object_tensor("root_lin_vel_w")
         self.object_angvel = self._object_tensor("root_ang_vel_w")
+        self._update_invalid_state_mask()
             
     def sim_real_indices(self):
         sim2real_idx_16, _ = self.hand.find_joints(self.cfg.actuated_joint_names, preserve_order=True)
