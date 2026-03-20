@@ -310,6 +310,14 @@ class ReorientationEnv(DirectRLEnv):
         invalid_env_ids = self.invalid_state_buf.nonzero(as_tuple=False).squeeze(-1)
         self._sanitize_invalid_state(invalid_env_ids)
 
+    def _mean_over_valid_envs(self, values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        finite = torch.isfinite(values)
+        valid = (~self.invalid_state_buf) & finite
+        valid_count = valid.sum()
+        if valid_count.item() == 0:
+            return torch.full((), float("nan"), device=self.device), valid_count
+        return values[valid].mean(), valid_count
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
 
@@ -425,14 +433,25 @@ class ReorientationEnv(DirectRLEnv):
                 total_reward,
             )
 
+        torque_info, torque_valid_envs = self._mean_over_valid_envs(torque_penalty)
+        object_linvel_info, object_linvel_valid_envs = self._mean_over_valid_envs(torch.norm(self.object_linvel, p=1, dim=-1))
+        roll_info, roll_valid_envs = self._mean_over_valid_envs(self.object_angvel[:, 0])
+        pitch_info, pitch_valid_envs = self._mean_over_valid_envs(self.object_angvel[:, 1])
+        yaw_info, yaw_valid_envs = self._mean_over_valid_envs(self.object_angvel[:, 2])
+
         self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean() / self.cfg.z_rotation_steps
         self.extras["log"]["pose_diff_penalty"] = pose_diff_penalty.mean() 
-        self.extras["log"]["torque_info"] = torque_penalty.mean() 
+        self.extras["log"]["torque_info"] = torque_info
+        self.extras["log"]["torque_info_valid_envs"] = torque_valid_envs.float()
         self.extras["log"]["invalid_state_count"] = self.invalid_state_buf.float().sum()
-        self.extras["log"]['object_linvel'] = torch.norm(self.object_linvel, p=1, dim=-1).mean()
-        self.extras["log"]['roll'] = self.object_angvel[:, 0].mean()
-        self.extras["log"]['pitch'] = self.object_angvel[:, 1].mean()
-        self.extras["log"]['yaw'] = self.object_angvel[:, 2].mean()
+        self.extras["log"]["object_linvel"] = object_linvel_info
+        self.extras["log"]["object_linvel_valid_envs"] = object_linvel_valid_envs.float()
+        self.extras["log"]["roll"] = roll_info
+        self.extras["log"]["roll_valid_envs"] = roll_valid_envs.float()
+        self.extras["log"]["pitch"] = pitch_info
+        self.extras["log"]["pitch_valid_envs"] = pitch_valid_envs.float()
+        self.extras["log"]["yaw"] = yaw_info
+        self.extras["log"]["yaw_valid_envs"] = yaw_valid_envs.float()
 
         # Log episode length statistics
         self.extras["log"]["avg_episode_length_s"] = (self.randomized_episode_lengths.float() * self.cfg.sim.dt * self.cfg.decimation).mean()
