@@ -1,14 +1,29 @@
 """Installation script for the 'LEAP_Isaaclab' python package."""
 
-import os
-import toml
+from pathlib import Path
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
-# Obtain the extension data from the extension.toml file
-EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
-# Read the extension.toml file
-EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extension.toml"))
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import toml
+
+    def load_toml(path: Path) -> dict:
+        return toml.load(path)
+else:
+
+    def load_toml(path: Path) -> dict:
+        with path.open("rb") as file:
+            return tomllib.load(file)
+
+
+EXTENSION_PATH = Path(__file__).resolve().parent
+PACKAGE_METADATA = load_toml(EXTENSION_PATH / "config" / "extension.toml").get("package", {})
+
+KEYWORDS = PACKAGE_METADATA.get("keywords", [])
+if isinstance(KEYWORDS, str):
+    KEYWORDS = [keyword.strip() for keyword in KEYWORDS.split(",") if keyword.strip()]
 
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
@@ -19,13 +34,13 @@ INSTALL_REQUIRES = [
 # Installation operation
 setup(
     name="LEAP_Isaaclab",
-    packages=["LEAP_Isaaclab"],
-    author=EXTENSION_TOML_DATA["package"]["author"],
-    maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
-    url=EXTENSION_TOML_DATA["package"]["repository"],
-    version=EXTENSION_TOML_DATA["package"]["version"],
-    description=EXTENSION_TOML_DATA["package"]["description"],
-    keywords=EXTENSION_TOML_DATA["package"]["keywords"],
+    packages=find_packages(include=["LEAP_Isaaclab", "LEAP_Isaaclab.*"]),
+    author=PACKAGE_METADATA.get("author", ""),
+    maintainer=PACKAGE_METADATA.get("maintainer", ""),
+    url=PACKAGE_METADATA.get("repository", ""),
+    version=PACKAGE_METADATA.get("version", "0.0.0"),
+    description=PACKAGE_METADATA.get("description", ""),
+    keywords=KEYWORDS,
     install_requires=INSTALL_REQUIRES,
     license="Apache 2.0",
     include_package_data=True,
