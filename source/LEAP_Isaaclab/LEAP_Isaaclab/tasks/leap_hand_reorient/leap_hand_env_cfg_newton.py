@@ -4,12 +4,9 @@
 
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
-import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
@@ -18,68 +15,6 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from LEAP_Isaaclab.assets import LEAP_HAND_CFG
-
-
-@configclass
-class EventCfg:
-    """Configuration for randomization."""
-
-    robot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,  # pyright: ignore[reportArgumentType]
-        mode="reset",
-        min_step_count_between_reset=720,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-    robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        min_step_count_between_reset=720,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "stiffness_distribution_params": (3.0, 3.0),
-            "damping_distribution_params": (0.1, 0.1),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    object_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,  # pyright: ignore[reportArgumentType]
-        min_step_count_between_reset=720,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-    object_scale_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        min_step_count_between_reset=720,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "mass_distribution_params": (1.0, 1.0),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-    object_scale_size = EventTerm(
-        func=mdp.randomize_rigid_body_scale,
-        mode="prestartup",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "scale_range": (1.1, 1.25),
-        },
-    )
 
 
 @configclass
@@ -185,54 +120,9 @@ class LeapHandEnvNewtonCfg(DirectRLEnvCfg):
     act_moving_average = 1.0 / 24
 
     enable_adr = False
-    starting_adr_increments = 0
-    min_rot_adr_coeff = 0.15
-    min_steps_for_dr_change = 240 * 4
-    obs_per_timestep = 32
-    obs_timesteps = 3
-
-    wrench_trigger_every = 90
-    torsional_radius = 0.0
-    wrench_prob_per_rollout = 0.5
-
     events = None
 
-    adr_cfg_dict = {
-        "num_increments": 25,
-        "robot_physics_material": {
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.5),
-        },
-        "robot_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (2.5, 3.1),
-            "damping_distribution_params": (0.05, 0.15),
-        },
-        "object_physics_material": {
-            "static_friction_range": (0.3, 1.5),
-            "dynamic_friction_range": (0.3, 1.5),
-            "restitution_range": (0.0, 0.5),
-        },
-        "object_scale_mass": {
-            "mass_distribution_params": (0.9, 1.3),
-        },
-    }
-
-    adr_custom_cfg_dict = {
-        "object_wrench": {
-            "max_linear_accel": (0.5, 5.0),
-        },
-        "object_spawn": {
-            "x_width_spawn": (0.0, 0.01),
-            "y_width_spawn": (0.0, 0.01),
-            "x_rotation": (0.0, 0.1),
-            "y_rotation": (0.0, 0.1),
-            "z_rotation": (0.0, 0.0),
-        },
-        "object_state_noise": {
-            "object_pos_noise": (0.0, 0.0),
-            "object_pos_bias": (0.0, 0.0),
-            "object_rot_noise": (0.0, 0.0),
-            "object_rot_bias": (0.0, 0.0),
-        },
-    }
+    def __post_init__(self):
+        super().__post_init__()
+        if self.enable_adr:
+            raise NotImplementedError("Newton backend does not support ADR in this environment yet.")

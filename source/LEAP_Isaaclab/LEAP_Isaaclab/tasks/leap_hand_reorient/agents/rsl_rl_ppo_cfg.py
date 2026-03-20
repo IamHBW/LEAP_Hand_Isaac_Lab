@@ -6,13 +6,15 @@
 from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import (
+    RslRlMLPModelCfg,
     RslRlOnPolicyRunnerCfg,
-    RslRlPpoActorCriticRecurrentCfg,
     RslRlPpoAlgorithmCfg,
+    RslRlRNNModelCfg,
 )
 
+
 @configclass
-class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg): 
+class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
     num_steps_per_env = 32
     max_iterations = 5000
@@ -23,13 +25,19 @@ class LeapHandPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         "actor": ["policy"],
         "critic": ["policy"],
     }
-    policy = RslRlPpoActorCriticRecurrentCfg(
-        init_noise_std=1.0,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
+    actor = RslRlRNNModelCfg(
+        hidden_dims=[512, 256, 128],
         activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+        rnn_type="gru",
+        rnn_hidden_dim=256,
+        rnn_num_layers=1,
+    )
+    critic = RslRlRNNModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
         rnn_type="gru",
         rnn_hidden_dim=256,
         rnn_num_layers=1,

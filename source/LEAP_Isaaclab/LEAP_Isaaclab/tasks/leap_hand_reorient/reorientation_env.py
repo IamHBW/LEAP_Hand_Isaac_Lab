@@ -10,21 +10,29 @@
 
 from __future__ import annotations
 
-import numpy as np
+from collections.abc import Sequence
+import math
+from typing import TYPE_CHECKING
+
 import torch
 import warp as wp
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
-import sys
-import math
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, euler_xyz_from_quat, quat_from_euler_xyz
-import time
+from isaaclab.utils.math import (
+    euler_xyz_from_quat,
+    matrix_from_quat,
+    quat_conjugate,
+    quat_from_angle_axis,
+    quat_from_euler_xyz,
+    quat_mul,
+    sample_uniform,
+    saturate,
+)
+
 if TYPE_CHECKING:
     from LEAP_Isaaclab.tasks.leap_hand_reorient.leap_hand_env_cfg import LeapHandEnvCfg
 
@@ -37,6 +45,7 @@ def _to_torch(data) -> torch.Tensor:
         return data
     return wp.to_torch(data)
 
+
 class ReorientationEnv(DirectRLEnv):
     cfg: LeapHandEnvCfg
 
@@ -45,111 +54,230 @@ class ReorientationEnv(DirectRLEnv):
 
         self.num_hand_dofs = self.hand.num_joints
 
-        # buffers for position targets
-        self.hand_dof_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
         self.prev_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
         self.cur_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
 
-        # list of actuated joints
         self.actuated_dof_indices = [self.hand.joint_names.index(j) for j in self.cfg.actuated_joint_names]
         self.actuated_dof_indices.sort()
 
-        # finger bodies
-        self.finger_bodies = list()
-        for body_name in self.cfg.fingertip_body_names:
-            self.finger_bodies.append(self.hand.body_names.index(body_name))
+        self.finger_bodies = [self.hand.body_names.index(body_name) for body_name in self.cfg.fingertip_body_names]
         self.finger_bodies.sort()
         self.num_fingertips = len(self.finger_bodies)
-        
-        # joint limits
-        joint_pos_limits = _to_torch(self.hand.data.soft_joint_pos_limits).to(self.device)
+
+        joint_pos_limits = self._hand_tensor("soft_joint_pos_limits").to(self.device)
         self.hand_dof_lower_limits = joint_pos_limits[..., 0]
         self.hand_dof_upper_limits = joint_pos_limits[..., 1]
 
-        # track goal resets
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        # used to compare object position
         self.object_default_state = self._build_default_object_root_state()
         self.in_hand_pos = self.object_default_state[:, 0:3].clone()
         self.in_hand_pos[:, 2] += 0.01
-        
-        # continuous z-axis rotation parameters
-        self.target_z_angle = torch.full((self.num_envs,), 2 * math.pi / self.cfg.z_rotation_steps, dtype=torch.float, device=self.device)
-        
-        # default goal positions and rotations
+
+        self.target_z_angle = torch.full(
+            (self.num_envs,),
+            2 * math.pi / self.cfg.z_rotation_steps,
+            dtype=torch.float,
+            device=self.device,
+        )
+
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
-        self.goal_rot[:, 0] = 1.0  # Identity quaternion
+        self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
-        
-        # initialize goal marker
+
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
-        # track successe
         self.successes = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.consecutive_successes = torch.zeros(1, dtype=torch.float, device=self.device)
 
-        self.override_default_joint_pos = torch.tensor([[0.000, 0.500, 0.000, 0.000, 
-                                                        -0.750, 1.300, 0.000, 0.750, 
-                                                         1.750, 1.500, 1.750, 1.750, 
-                                                         0.000, 1.000, 0.000, 0.000]], device=self.device).repeat(self.num_envs, 1)
+        self.override_default_joint_pos = torch.tensor(
+            [[0.000, 0.500, 0.000, 0.000, -0.750, 1.300, 0.000, 0.750, 1.750, 1.500, 1.750, 1.750, 0.000, 1.000, 0.000, 0.000]],
+            device=self.device,
+        ).repeat(self.num_envs, 1)
 
         self.object_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.object_linvel = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.object_angvel = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.object_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
-        self.object_rot[:, 0] = 1.0 
+        self.object_rot[:, 0] = 1.0
 
-        # initialize history tensor
-        self.obs_hist_buf = torch.zeros((self.num_envs, self.cfg.observation_space // self.cfg.hist_len, self.cfg.hist_len), device=self.device, dtype=torch.double)            
-        self.output_obs_hist_buf = torch.zeros(self.cfg.scene.num_envs, self.cfg.observation_space // self.cfg.hist_len, self.cfg.hist_len, device=self.cfg.sim.device, dtype=torch.double)
-            
-        # unit tensors
+        self.obs_hist_buf = torch.zeros(
+            (self.num_envs, self.cfg.observation_space // self.cfg.hist_len, self.cfg.hist_len),
+            device=self.device,
+            dtype=torch.double,
+        )
+        self.output_obs_hist_buf = torch.zeros(
+            self.cfg.scene.num_envs,
+            self.cfg.observation_space // self.cfg.hist_len,
+            self.cfg.hist_len,
+            device=self.cfg.sim.device,
+            dtype=torch.double,
+        )
+
         self.x_unit_tensor = torch.tensor([1, 0, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
 
-        self.randomized_episode_lengths = torch.randint(int(self.cfg.min_episode_length_s / (self.cfg.sim.dt * self.cfg.decimation)), self.max_episode_length + 1, (self.num_envs,), dtype=torch.int32, device=self.device)
+        self.randomized_episode_lengths = self._sample_episode_lengths(self.num_envs)
 
-        # set adr up
         if self.cfg.enable_adr:
-            self.leap_adr = LeapHandADR(self.event_manager, 
-                                                    self.cfg.adr_cfg_dict, 
-                                                    self.cfg.adr_custom_cfg_dict)
+            self.leap_adr = LeapHandADR(self.event_manager, self.cfg.adr_cfg_dict, self.cfg.adr_custom_cfg_dict)
             self.step_since_last_dr_change = 0
             self.leap_adr.set_num_increments(self.cfg.starting_adr_increments)
             adr_utils.init_adr_obs_act_noise(self)
 
-            self.obs_hist_buf = torch.zeros(self.num_envs, self.cfg.observation_space // self.cfg.hist_len, self.cfg.hist_len + self.cfg.obs_max_latency, device=cfg.sim.device, dtype=torch.float)
-            self.obs_latency = torch.empty((self.num_envs, self.cfg.obs_per_timestep), device =self.cfg.sim.device)
-            self.act_latency = torch.empty((self.num_envs, self.cfg.action_space), device =self.cfg.sim.device)
-            self.act_hist_buf = torch.zeros(self.num_envs, self.cfg.action_space, self.cfg.act_max_latency + 1, device=self.cfg.sim.device, dtype=torch.float)
+            self.obs_hist_buf = torch.zeros(
+                self.num_envs,
+                self.cfg.observation_space // self.cfg.hist_len,
+                self.cfg.hist_len + self.cfg.obs_max_latency,
+                device=cfg.sim.device,
+                dtype=torch.float,
+            )
+            self.obs_latency = torch.empty((self.num_envs, self.cfg.obs_per_timestep), device=self.cfg.sim.device)
+            self.act_latency = torch.empty((self.num_envs, self.cfg.action_space), device=self.cfg.sim.device)
+            self.act_hist_buf = torch.zeros(
+                self.num_envs,
+                self.cfg.action_space,
+                self.cfg.act_max_latency + 1,
+                device=self.cfg.sim.device,
+                dtype=torch.float,
+            )
 
             print("starting ranges: ")
             print(self.leap_adr.print_params())
-        
-        # Initialize extras if not already present
+
         if not hasattr(self, "extras") or self.extras is None:
             self.extras = {}
         if "log" not in self.extras:
             self.extras["log"] = {}
 
-        self.sim_real_indices()
-
     def _setup_scene(self):
-        # add hand, in-hand object, and goal object
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
-        # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        # clone and replicate (no need to filter for this environment)
         self.scene.clone_environments(copy_from_source=False)
-        # add articulation to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
-        # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _asset_tensor(self, asset: Articulation | RigidObject, name: str) -> torch.Tensor:
+        return _to_torch(getattr(asset.data, name))
+
+    def _hand_tensor(self, name: str) -> torch.Tensor:
+        return self._asset_tensor(self.hand, name)
+
+    def _object_tensor(self, name: str) -> torch.Tensor:
+        return self._asset_tensor(self.object, name)
+
+    def _sample_episode_lengths(self, count: int) -> torch.Tensor:
+        min_episode_steps = int(self.cfg.min_episode_length_s / (self.cfg.sim.dt * self.cfg.decimation))
+        return torch.randint(
+            min_episode_steps,
+            self.max_episode_length + 1,
+            (count,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    def _make_reset_object_state(self, env_ids: Sequence[int]) -> torch.Tensor:
+        object_default_state = self.object_default_state[env_ids].clone()
+        object_default_state[:, 0:3] += self.scene.env_origins[env_ids]
+        object_default_state[:, 7:] = 0.0
+        return object_default_state
+
+    def _apply_adr_object_state_noise(self, env_ids: Sequence[int], object_default_state: torch.Tensor) -> None:
+        x_width = self.leap_adr.get_custom_param_value("object_spawn", "x_width_spawn")
+        y_width = self.leap_adr.get_custom_param_value("object_spawn", "y_width_spawn")
+        x_rot = self.leap_adr.get_custom_param_value("object_spawn", "x_rotation")
+        y_rot = self.leap_adr.get_custom_param_value("object_spawn", "y_rotation")
+        z_rot = self.leap_adr.get_custom_param_value("object_spawn", "z_rotation")
+
+        if x_width > 0 or y_width > 0:
+            pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+            object_default_state[:, 0] += pos_noise[:, 0] * x_width
+            object_default_state[:, 1] += pos_noise[:, 1] * y_width
+
+        self._apply_axis_rotation_noise(env_ids, object_default_state, x_rot, self.x_unit_tensor)
+        self._apply_axis_rotation_noise(env_ids, object_default_state, y_rot, self.y_unit_tensor)
+        self._apply_axis_rotation_noise(env_ids, object_default_state, z_rot, self.z_unit_tensor)
+
+    def _apply_axis_rotation_noise(
+        self,
+        env_ids: Sequence[int],
+        object_default_state: torch.Tensor,
+        rotation_scale: float,
+        axis_tensor: torch.Tensor,
+    ) -> None:
+        if rotation_scale <= 0:
+            return
+        rotation_noise = sample_uniform(-1.0, 1.0, (len(env_ids),), device=self.device)
+        rotation_quat = quat_from_angle_axis(rotation_noise * rotation_scale, axis_tensor[env_ids])
+        object_default_state[:, 3:7] = quat_mul(rotation_quat, object_default_state[:, 3:7])
+
+    def _apply_adr_joint_state_noise(
+        self,
+        env_ids: Sequence[int],
+        dof_pos: torch.Tensor,
+        dof_vel: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        joint_pos_noise_width = self.leap_adr.get_custom_param_value("robot_spawn", "joint_pos_noise")
+        joint_vel_noise_width = self.leap_adr.get_custom_param_value("robot_spawn", "joint_vel_noise")
+
+        if joint_pos_noise_width > 0:
+            joint_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+            dof_pos += joint_pos_noise * joint_pos_noise_width
+
+        if joint_vel_noise_width > 0:
+            joint_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+            dof_vel += joint_vel_noise * joint_vel_noise_width
+
+        return dof_pos, dof_vel
+
+    def _update_adr_reset_state(self, env_ids: Sequence[int], adr_criteria: torch.Tensor) -> None:
+        if len(env_ids) == 0:
+            return
+
+        adr_utils.update_adr_obs_act_noise(self, env_ids)
+
+        obs_latency_resets = self.leap_adr.get_custom_param_value("obs_latency", "latency") - torch.randint(
+            0,
+            self.cfg.obs_latency_rand + 1,
+            (len(env_ids), 1),
+            device=self.cfg.sim.device,
+        )
+        obs_latency_resets = torch.maximum(obs_latency_resets, torch.tensor(0))
+        self.obs_latency[env_ids, :] = obs_latency_resets.expand(-1, self.cfg.obs_per_timestep)
+
+        act_latency_resets = self.leap_adr.get_custom_param_value("action_latency", "hand_latency") - torch.randint(
+            0,
+            self.cfg.act_latency_rand + 1,
+            (len(env_ids), 1),
+            device=self.cfg.sim.device,
+        )
+        act_latency_resets = torch.maximum(act_latency_resets, torch.tensor(0))
+        self.act_latency[env_ids, :] = act_latency_resets.expand(-1, self.cfg.action_space)
+
+        self.extras["log"]["num_adr_increases"] = self.leap_adr.num_increments()
+
+        if self.step_since_last_dr_change >= self.cfg.min_steps_for_dr_change and adr_criteria >= self.cfg.min_rot_adr_coeff:
+            self.step_since_last_dr_change = 0
+            self.leap_adr.increase_ranges()
+            self.leap_adr.print_params()
+            self.consecutive_successes.fill_(0.0)
+        else:
+            self.step_since_last_dr_change += 1
+
+        self.object_mass = self._object_tensor("body_mass").to(device=self.device)
+        self.apply_wrench = torch.rand(self.num_envs, device=self.device) <= self.cfg.wrench_prob_per_rollout
+
+    def _initialize_goal_rotation(self, env_ids: Sequence[int]) -> None:
+        self._compute_intermediate_values()
+        roll, pitch, yaw = euler_xyz_from_quat(self.object_rot[env_ids])
+        roll.zero_()
+        pitch.zero_()
+        self.goal_rot[env_ids] = quat_from_euler_xyz(roll, pitch, yaw)
+        self._update_continuous_z_rotation(env_ids)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
@@ -223,7 +351,7 @@ class ReorientationEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
 
         pose_diff_penalty = ((self.cur_targets[:, self.actuated_dof_indices] - self.override_default_joint_pos) ** 2).sum(-1)
-        torque_penalty = (_to_torch(self.hand.data.computed_torque) ** 2).sum(-1)
+        torque_penalty = (self._hand_tensor("computed_torque") ** 2).sum(-1)
 
         (
             total_reward,
@@ -305,116 +433,39 @@ class ReorientationEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
 
+        adr_criteria = None
         if self.cfg.enable_adr:
-            adr_criteria = ((self.consecutive_successes.float().mean() / self.cfg.z_rotation_steps) / (self.randomized_episode_lengths.float().mean() * self.cfg.sim.dt * self.cfg.decimation)).float().mean()
+            adr_criteria = (
+                (self.consecutive_successes.float().mean() / self.cfg.z_rotation_steps)
+                / (self.randomized_episode_lengths.float().mean() * self.cfg.sim.dt * self.cfg.decimation)
+            ).float().mean()
 
-        # resets articulation and rigid body attributes
         super()._reset_idx(env_ids)
 
-        self.randomized_episode_lengths[env_ids] = torch.randint(
-            int(self.cfg.min_episode_length_s / (self.cfg.sim.dt * self.cfg.decimation)), 
-            self.max_episode_length + 1, 
-            (len(env_ids),), 
-            dtype=torch.int32, 
-            device=self.device
-        )
+        self.randomized_episode_lengths[env_ids] = self._sample_episode_lengths(len(env_ids))
 
-        # reset object
-        object_default_state = self.object_default_state[env_ids].clone()
-        dof_pos = self.override_default_joint_pos[env_ids] 
-        dof_vel = _to_torch(self.hand.data.default_joint_vel)[env_ids]
-        
-        object_default_state[:, 0:3] += self.scene.env_origins[env_ids]
-        object_default_state[:, 7:] = 0.0
+        object_default_state = self._make_reset_object_state(env_ids)
+        dof_pos = self.override_default_joint_pos[env_ids]
+        dof_vel = self._hand_tensor("default_joint_vel")[env_ids]
 
         if self.cfg.enable_adr:
-            x_width = self.leap_adr.get_custom_param_value("object_spawn", "x_width_spawn")
-            y_width = self.leap_adr.get_custom_param_value("object_spawn", "y_width_spawn")
-            x_rot = self.leap_adr.get_custom_param_value("object_spawn", "x_rotation")
-            y_rot = self.leap_adr.get_custom_param_value("object_spawn", "y_rotation")
-            z_rot = self.leap_adr.get_custom_param_value("object_spawn", "z_rotation")
-            
-            # Apply randomization
-            if x_width > 0 or y_width > 0:
-                pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-                object_default_state[:, 0] += pos_noise[:, 0] * x_width
-                object_default_state[:, 1] += pos_noise[:, 1] * y_width
-            
-            if x_rot > 0:
-                x_rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids),), device=self.device)
-                x_rot_quat = quat_from_angle_axis(x_rot_noise * x_rot, self.x_unit_tensor[env_ids])
-                object_default_state[:, 3:7] = quat_mul(x_rot_quat, object_default_state[:, 3:7])
-                
-            if y_rot > 0:
-                y_rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids),), device=self.device)
-                y_rot_quat = quat_from_angle_axis(y_rot_noise * y_rot, self.y_unit_tensor[env_ids])
-                object_default_state[:, 3:7] = quat_mul(y_rot_quat, object_default_state[:, 3:7])
-                
-            if z_rot > 0:
-                z_rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids),), device=self.device)
-                z_rot_quat = quat_from_angle_axis(z_rot_noise * z_rot, self.z_unit_tensor[env_ids])
-                object_default_state[:, 3:7] = quat_mul(z_rot_quat, object_default_state[:, 3:7])
-
-            joint_pos_noise_width = self.leap_adr.get_custom_param_value("robot_spawn", "joint_pos_noise")
-            joint_vel_noise_width = self.leap_adr.get_custom_param_value("robot_spawn", "joint_vel_noise")
-
-            if joint_pos_noise_width > 0:
-                joint_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-                dof_pos += joint_pos_noise * joint_pos_noise_width
-                
-            if joint_vel_noise_width > 0:
-                joint_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-                dof_vel += joint_vel_noise * joint_vel_noise_width
+            self._apply_adr_object_state_noise(env_ids, object_default_state)
+            dof_pos, dof_vel = self._apply_adr_joint_state_noise(env_ids, dof_pos, dof_vel)
 
         self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
         self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
-        # reset hand
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
-        self.hand_dof_targets[env_ids] = dof_pos
         self.successes[env_ids] = 0
 
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
 
-        if self.cfg.enable_adr and len(env_ids) > 0:
-            adr_utils.update_adr_obs_act_noise(self, env_ids)
+        if self.cfg.enable_adr:
+            self._update_adr_reset_state(env_ids, adr_criteria)
 
-            obs_latency_resets =  self.leap_adr.get_custom_param_value("obs_latency","latency") - torch.randint(0, self.cfg.obs_latency_rand + 1, (len(env_ids),1), device=self.cfg.sim.device)
-            obs_latency_resets = torch.maximum(obs_latency_resets, torch.tensor(0))
-            self.obs_latency[env_ids, :] = obs_latency_resets.expand(-1, self.cfg.obs_per_timestep)
-            
-            act_latency_resets = self.leap_adr.get_custom_param_value("action_latency","hand_latency") - torch.randint(0, self.cfg.act_latency_rand + 1, (len(env_ids), 1), device=self.cfg.sim.device)
-            act_latency_resets = torch.maximum(act_latency_resets, torch.tensor(0))
-            self.act_latency[env_ids, :] = act_latency_resets.expand(-1, self.cfg.action_space)
-            
-            self.extras["log"]["num_adr_increases"] = self.leap_adr.num_increments()
-            
-            if self.step_since_last_dr_change >= self.cfg.min_steps_for_dr_change and\
-                (adr_criteria  >= self.cfg.min_rot_adr_coeff):
-                self.step_since_last_dr_change = 0
-                self.leap_adr.increase_ranges()
-                self.leap_adr.print_params()
-                self.consecutive_successes.fill_(0.0)
-            else:
-                self.step_since_last_dr_change += 1
-
-            # update whether to apply wrench for the episode
-            self.object_mass = _to_torch(self.object.data.body_mass).to(device=self.device)
-            self.apply_wrench = torch.where(
-                torch.rand(self.num_envs, device=self.device) <= self.cfg.wrench_prob_per_rollout,
-                True,
-                False)
-
-        # initialize goal rotation
-        self._compute_intermediate_values()
-        r,p,y = euler_xyz_from_quat(self.object_rot[env_ids])
-        r[:].fill_(0.0)
-        p[:].fill_(0.0)
-        self.goal_rot[env_ids] = quat_from_euler_xyz(r,p,y)
-
-        self._update_continuous_z_rotation(env_ids)
+        self._initialize_goal_rotation(env_ids)
 
     def _build_default_object_root_state(self) -> torch.Tensor:
         object_default_state = torch.zeros((self.num_envs, 13), dtype=torch.float32, device=self.device)
@@ -423,26 +474,21 @@ class ReorientationEnv(DirectRLEnv):
         return object_default_state
 
     def _compute_intermediate_values(self):
-        # data for hand
-        hand_body_pos_w = _to_torch(self.hand.data.body_pos_w)
-        hand_body_quat_w = _to_torch(self.hand.data.body_quat_w)
-        hand_body_vel_w = _to_torch(self.hand.data.body_vel_w)
+        hand_body_pos_w = self._hand_tensor("body_pos_w")
+        hand_body_quat_w = self._hand_tensor("body_quat_w")
         self.fingertip_pos = hand_body_pos_w[:, self.finger_bodies]
         self.fingertip_rot = hand_body_quat_w[:, self.finger_bodies]
         self.fingertip_pos -= self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(
             self.num_envs, self.num_fingertips, 3
         )
-        self.fingertip_velocities = hand_body_vel_w[:, self.finger_bodies]
 
-        self.hand_dof_pos = _to_torch(self.hand.data.joint_pos)
-        self.hand_dof_vel = _to_torch(self.hand.data.joint_vel)
+        self.hand_dof_pos = self._hand_tensor("joint_pos")
+        self.hand_dof_vel = self._hand_tensor("joint_vel")
 
-        # data for object
-        self.object_pos = _to_torch(self.object.data.root_pos_w) - self.scene.env_origins
-        self.object_rot = _to_torch(self.object.data.root_quat_w) #w,x,y,z
-        self.object_velocities = _to_torch(self.object.data.root_vel_w)
-        self.object_linvel = _to_torch(self.object.data.root_lin_vel_w)
-        self.object_angvel = _to_torch(self.object.data.root_ang_vel_w)
+        self.object_pos = self._object_tensor("root_pos_w") - self.scene.env_origins
+        self.object_rot = self._object_tensor("root_quat_w")
+        self.object_linvel = self._object_tensor("root_lin_vel_w")
+        self.object_angvel = self._object_tensor("root_ang_vel_w")
             
     def sim_real_indices(self):
         sim2real_idx_16, _ = self.hand.find_joints(self.cfg.actuated_joint_names, preserve_order=True)
